@@ -2,7 +2,7 @@
 
 A [StarMash](https://starmash.airmash.rocks) / SWAM extension that shows where everyone else's nose is pointing before the missiles explain it for them.
 
-Install URL: `EXTENSION_URL_AFTER_FIRST_PUBLISH`
+Install URL: `https://cdn.jsdelivr.net/gh/Auroboris/line-of-fire@5782584f8b2a82d68c847bfa4dce53c5b75805dd/extension.js`
 
 ## What it does
 

@@ -16,6 +16,7 @@
     maxDistance: 6000,
     fadeWithDistance: true,
     energyBrightness: true,
+    energyColors: true,
     hideWhenUnableToFire: true,
     warningRadius: 250,
     dangerRadius: 100,
@@ -23,7 +24,19 @@
     threatPulseSpeed: 800,
     threatPulseStrength: 85,
     normalColorPreset: "#ffffff",
-    normalCustomColor: "#ffffff"
+    normalCustomColor: "#ffffff",
+    mediumEnergyColorPreset: "#ffcc00",
+    mediumEnergyCustomColor: "#ffcc00",
+    lowEnergyColorPreset: "#ff3b30",
+    lowEnergyCustomColor: "#ff3b30"
+  };
+
+  const NOSE_OFFSET_BY_TYPE = {
+    1: 37,
+    2: 35,
+    3: 27,
+    4: 47,
+    5: 34
   };
 
   const FIRE_ENERGY_BY_TYPE = {
@@ -112,6 +125,48 @@
     );
   }
 
+  function getMediumEnergyColor() {
+    return getConfiguredColor(
+      "mediumEnergyColorPreset",
+      "mediumEnergyCustomColor",
+      DEFAULTS.mediumEnergyColorPreset
+    );
+  }
+
+  function getLowEnergyColor() {
+    return getConfiguredColor(
+      "lowEnergyColorPreset",
+      "lowEnergyCustomColor",
+      DEFAULTS.lowEnergyColorPreset
+    );
+  }
+
+  function lerpColor(from, to, amount) {
+    const ratio = clamp(amount, 0, 1);
+    const fromRed = from >> 16 & 255;
+    const fromGreen = from >> 8 & 255;
+    const fromBlue = from & 255;
+    const toRed = to >> 16 & 255;
+    const toGreen = to >> 8 & 255;
+    const toBlue = to & 255;
+
+    return Math.round(fromRed + (toRed - fromRed) * ratio) << 16 |
+      Math.round(fromGreen + (toGreen - fromGreen) * ratio) << 8 |
+      Math.round(fromBlue + (toBlue - fromBlue) * ratio);
+  }
+
+  function getEnergyColor(energy) {
+    const fullColor = getNormalColor();
+    if (!settings.energyColors) return fullColor;
+
+    const value = clamp(energy, 0, 1);
+    if (value >= 0.5) {
+      return lerpColor(getMediumEnergyColor(), fullColor, (value - 0.5) * 2);
+    }
+
+    return lerpColor(getLowEnergyColor(), getMediumEnergyColor(), value * 2);
+  }
+
   function nowMs() {
     if (typeof performance !== "undefined" &&
       typeof performance.now === "function") {
@@ -155,6 +210,8 @@
     try {
       if (entry.sprite.parent) entry.sprite.parent.removeChild(entry.sprite);
       entry.sprite.destroy();
+      if (entry.glow.parent) entry.glow.parent.removeChild(entry.glow);
+      entry.glow.destroy();
     } catch (error) {
       // The game may already have destroyed the old plane sprite.
     }
@@ -166,12 +223,9 @@
     Array.from(lines.keys()).forEach(removeLine);
   }
 
-  function createLine(player) {
-    const owner = player && player.sprites ? player.sprites.sprite : null;
-    if (!owner) return null;
-
+  function createRaySprite(name) {
     const sprite = new PIXI.Sprite(PIXI.Texture.WHITE);
-    sprite.name = EXTENSION_ID + "-" + player.id;
+    sprite.name = name;
     sprite.rotation = Math.PI;
     sprite.roundPixels = true;
 
@@ -183,8 +237,24 @@
       sprite.position.set(0, 0);
     }
 
+    return sprite;
+  }
+
+  function createLine(player) {
+    const owner = player && player.sprites ? player.sprites.sprite : null;
+    if (!owner) return null;
+
+    const glow = createRaySprite(EXTENSION_ID + "-glow-" + player.id);
+    const sprite = createRaySprite(EXTENSION_ID + "-" + player.id);
+
+    glow.visible = false;
+    if (typeof PIXI.BLEND_MODES !== "undefined" && PIXI.BLEND_MODES.ADD) {
+      glow.blendMode = PIXI.BLEND_MODES.ADD;
+    }
+
+    owner.addChild(glow);
     owner.addChild(sprite);
-    const entry = {owner: owner, sprite: sprite};
+    const entry = {owner: owner, sprite: sprite, glow: glow};
     lines.set(String(player.id), entry);
     return entry;
   }
@@ -199,7 +269,8 @@
       return null;
     }
 
-    if (!entry || entry.owner !== owner || entry.sprite.parent !== owner) {
+    if (!entry || entry.owner !== owner || entry.sprite.parent !== owner ||
+      entry.glow.parent !== owner) {
       removeLine(id);
       entry = createLine(player);
     }
@@ -236,20 +307,85 @@
     return Math.sqrt(dx * dx + dy * dy);
   }
 
-  function getThreatLevel(player, me) {
+  function getNoseOffset(player) {
+    try {
+      const collisions = typeof config !== "undefined" && config.ships &&
+        config.ships[player.type] && config.ships[player.type].collisions;
+
+      if (Array.isArray(collisions) && collisions.length) {
+        return collisions.reduce(function(farthest, circle) {
+          return Array.isArray(circle) && circle.length >= 3
+            ? Math.max(farthest, Number(circle[2]) - Number(circle[1]))
+            : farthest;
+        }, 0);
+      }
+    } catch (error) {
+      // Fall back to the standard StarMash collision outlines below.
+    }
+
+    return NOSE_OFFSET_BY_TYPE[Number(player.type)] || 35;
+  }
+
+  function getRayGeometry(player) {
     const rotation = Number(player.rot) || 0;
     const directionX = Math.sin(rotation);
     const directionY = -Math.cos(rotation);
-    const toMeX = Number(me.pos.x) - Number(player.pos.x);
-    const toMeY = Number(me.pos.y) - Number(player.pos.y);
-    const forwardDistance = toMeX * directionX + toMeY * directionY;
+    const noseOffset = getNoseOffset(player);
 
-    if (forwardDistance <= 0 || forwardDistance > clamp(settings.lineLength, 250, 10000)) {
+    return {
+      directionX: directionX,
+      directionY: directionY,
+      noseOffset: noseOffset,
+      originX: Number(player.pos.x) + directionX * noseOffset,
+      originY: Number(player.pos.y) + directionY * noseOffset
+    };
+  }
+
+  function getObstacleClippedLength(geometry, requestedLength) {
+    const maximum = clamp(requestedLength, 0, 10000);
+    let nearest = maximum;
+    let walls;
+
+    try {
+      walls = typeof config !== "undefined" && config.walls;
+    } catch (error) {
+      walls = null;
+    }
+
+    if (!Array.isArray(walls)) return nearest;
+
+    walls.forEach(function(wall) {
+      if (!Array.isArray(wall) || wall.length < 3) return;
+
+      const offsetX = geometry.originX - Number(wall[0]);
+      const offsetY = geometry.originY - Number(wall[1]);
+      const radius = Math.max(0, Number(wall[2]));
+      const along = offsetX * geometry.directionX +
+        offsetY * geometry.directionY;
+      const discriminant = along * along -
+        (offsetX * offsetX + offsetY * offsetY - radius * radius);
+
+      if (discriminant < 0) return;
+
+      const hitDistance = -along - Math.sqrt(discriminant);
+      if (hitDistance >= 0 && hitDistance < nearest) nearest = hitDistance;
+    });
+
+    return nearest;
+  }
+
+  function getThreatLevel(geometry, me, visibleLength) {
+    const toMeX = Number(me.pos.x) - geometry.originX;
+    const toMeY = Number(me.pos.y) - geometry.originY;
+    const forwardDistance = toMeX * geometry.directionX +
+      toMeY * geometry.directionY;
+
+    if (forwardDistance <= 0 || forwardDistance > visibleLength) {
       return 0;
     }
 
     const perpendicularDistance = Math.abs(
-      toMeX * directionY - toMeY * directionX
+      toMeX * geometry.directionY - toMeY * geometry.directionX
     );
     const dangerRadius = clamp(settings.dangerRadius, 20, 500);
     const warningRadius = Math.max(
@@ -296,14 +432,12 @@
   }
 
   function getThreatPulse(time, threatLevel) {
-    if (!settings.threatPulse) return 1;
-
     const duration = clamp(settings.threatPulseSpeed, 250, 2000);
     const wave = (Math.sin(time / duration * Math.PI * 2 - Math.PI / 2) + 1) / 2;
     return wave * (threatLevel === 2 ? 1 : 0.7);
   }
 
-  function styleLine(entry, player, distance, threatLevel, time) {
+  function styleLine(entry, player, geometry, visibleLength, distance, threatLevel, time) {
     const ownerScaleX = entry.owner.scale && Number(entry.owner.scale.x);
     const ownerScaleY = entry.owner.scale && Number(entry.owner.scale.y);
     const scaleX = Math.max(0.1, Math.abs(ownerScaleX || 1));
@@ -324,23 +458,34 @@
 
     const baseAlpha = clamp(settings.lineBrightness, 10, 100) / 100 *
       distanceFade * readinessFade;
+    const lineColor = getEnergyColor(readiness.energy);
+    const lineWidth = clamp(settings.lineWidth, 1, 30) / scaleX;
+    const lineHeight = Math.max(0, visibleLength) / scaleY;
+    const localOriginY = -geometry.noseOffset / scaleY;
+    const pulse = threatLevel > 0 && settings.threatPulse
+      ? getThreatPulse(time, threatLevel)
+      : 0;
     const threatStrength = clamp(settings.threatPulseStrength, 10, 100) / 100;
-    const pulse = threatLevel > 0 ? getThreatPulse(time, threatLevel) : 0;
 
-    entry.sprite.width = clamp(settings.lineWidth, 1, 30) / scaleX;
-    entry.sprite.height = clamp(settings.lineLength, 250, 10000) / scaleY;
-    entry.sprite.alpha = clamp(
-      baseAlpha + (1 - baseAlpha) * pulse * threatStrength,
-      0,
-      1
-    );
-    entry.sprite.tint = getNormalColor();
-    return true;
+    entry.sprite.position.set(0, localOriginY);
+    entry.sprite.width = lineWidth;
+    entry.sprite.height = lineHeight;
+    entry.sprite.alpha = baseAlpha;
+    entry.sprite.tint = lineColor;
+
+    entry.glow.position.set(0, localOriginY);
+    entry.glow.width = lineWidth * (threatLevel === 2 ? 4 : 2.5);
+    entry.glow.height = lineHeight;
+    entry.glow.alpha = clamp(pulse * threatStrength * 0.65, 0, 0.75);
+    entry.glow.tint = lineColor;
+    entry.glow.visible = pulse > 0 && visibleLength > 0;
+    return visibleLength > 0;
   }
 
   function hideAllLines() {
     lines.forEach(function(entry) {
       entry.sprite.visible = false;
+      entry.glow.visible = false;
     });
   }
 
@@ -375,16 +520,32 @@
 
       if (!visible) {
         entry.sprite.visible = false;
+        entry.glow.visible = false;
         return;
       }
 
-      const threatLevel = getThreatLevel(player, me);
+      const geometry = getRayGeometry(player);
+      const visibleLength = getObstacleClippedLength(
+        geometry,
+        clamp(settings.lineLength, 250, 10000)
+      );
+      const threatLevel = getThreatLevel(geometry, me, visibleLength);
       if (settings.threatOnly && threatLevel === 0) {
         entry.sprite.visible = false;
+        entry.glow.visible = false;
         return;
       }
 
-      entry.sprite.visible = styleLine(entry, player, distance, threatLevel, time);
+      entry.sprite.visible = styleLine(
+        entry,
+        player,
+        geometry,
+        visibleLength,
+        distance,
+        threatLevel,
+        time
+      );
+      if (!entry.sprite.visible) entry.glow.visible = false;
     });
   }
 
@@ -527,7 +688,7 @@
       step: 500
     });
     lineSection.addBoolean("fadeWithDistance", "Fade distant lines");
-    addColorFields(lineSection, "normal", "Normal line");
+    addColorFields(lineSection, "normal", "Base / full-energy line");
 
     const readinessSection = provider.addSection("Weapon Readiness");
 
@@ -536,9 +697,15 @@
       "Fade line brightness with weapon energy"
     );
     readinessSection.addBoolean(
+      "energyColors",
+      "Change line color with weapon energy"
+    );
+    readinessSection.addBoolean(
       "hideWhenUnableToFire",
       "Hide lines while their plane cannot fire"
     );
+    addColorFields(readinessSection, "mediumEnergy", "Medium-energy line");
+    addColorFields(readinessSection, "lowEnergy", "Low-energy line");
 
     const threatSection = provider.addSection("Threat Alerts");
 
@@ -581,9 +748,9 @@
   SWAM.registerExtension({
     name: "Line of Fire",
     id: EXTENSION_ID,
-    description: "Aim vectors, weapon readiness, and threat warnings for nearby planes in StarMash.",
+    description: "Terrain-aware aim vectors, weapon readiness, and threat warnings for nearby planes in StarMash.",
     author: "Auroboris",
-    version: "1.1.0",
+    version: "1.2.0",
     settingsProvider: createSettingsProvider()
   });
 }();

@@ -15,8 +15,6 @@
     lineBrightness: 45,
     maxDistance: 6000,
     fadeWithDistance: true,
-    energyBrightness: true,
-    energyColors: true,
     hideWhenUnableToFire: true,
     warningRadius: 250,
     dangerRadius: 100,
@@ -24,11 +22,7 @@
     threatPulseSpeed: 800,
     threatPulseStrength: 85,
     normalColorPreset: "#ffffff",
-    normalCustomColor: "#ffffff",
-    mediumEnergyColorPreset: "#ffcc00",
-    mediumEnergyCustomColor: "#ffcc00",
-    lowEnergyColorPreset: "#ff3b30",
-    lowEnergyCustomColor: "#ff3b30"
+    normalCustomColor: "#ffffff"
   };
 
   const NOSE_OFFSET_BY_TYPE = {
@@ -123,48 +117,6 @@
       "normalCustomColor",
       DEFAULTS.normalColorPreset
     );
-  }
-
-  function getMediumEnergyColor() {
-    return getConfiguredColor(
-      "mediumEnergyColorPreset",
-      "mediumEnergyCustomColor",
-      DEFAULTS.mediumEnergyColorPreset
-    );
-  }
-
-  function getLowEnergyColor() {
-    return getConfiguredColor(
-      "lowEnergyColorPreset",
-      "lowEnergyCustomColor",
-      DEFAULTS.lowEnergyColorPreset
-    );
-  }
-
-  function lerpColor(from, to, amount) {
-    const ratio = clamp(amount, 0, 1);
-    const fromRed = from >> 16 & 255;
-    const fromGreen = from >> 8 & 255;
-    const fromBlue = from & 255;
-    const toRed = to >> 16 & 255;
-    const toGreen = to >> 8 & 255;
-    const toBlue = to & 255;
-
-    return Math.round(fromRed + (toRed - fromRed) * ratio) << 16 |
-      Math.round(fromGreen + (toGreen - fromGreen) * ratio) << 8 |
-      Math.round(fromBlue + (toBlue - fromBlue) * ratio);
-  }
-
-  function getEnergyColor(energy) {
-    const fullColor = getNormalColor();
-    if (!settings.energyColors) return fullColor;
-
-    const value = clamp(energy, 0, 1);
-    if (value >= 0.5) {
-      return lerpColor(getMediumEnergyColor(), fullColor, (value - 0.5) * 2);
-    }
-
-    return lerpColor(getLowEnergyColor(), getMediumEnergyColor(), value * 2);
   }
 
   function nowMs() {
@@ -450,15 +402,9 @@
 
     if (settings.hideWhenUnableToFire && !readiness.canFire) return false;
 
-    let readinessFade = settings.energyBrightness
-      ? 0.3 + readiness.energy * 0.7
-      : 1;
-
-    if (!readiness.canFire) readinessFade *= 0.25;
-
     const baseAlpha = clamp(settings.lineBrightness, 10, 100) / 100 *
-      distanceFade * readinessFade;
-    const lineColor = getEnergyColor(readiness.energy);
+      distanceFade;
+    const lineColor = getNormalColor();
     const lineWidth = clamp(settings.lineWidth, 1, 30) / scaleX;
     const lineHeight = Math.max(0, visibleLength) / scaleY;
     const localOriginY = -geometry.noseOffset / scaleY;
@@ -688,24 +634,14 @@
       step: 500
     });
     lineSection.addBoolean("fadeWithDistance", "Fade distant lines");
-    addColorFields(lineSection, "normal", "Base / full-energy line");
+    addColorFields(lineSection, "normal", "Base line");
 
     const readinessSection = provider.addSection("Weapon Readiness");
 
     readinessSection.addBoolean(
-      "energyBrightness",
-      "Fade line brightness with weapon energy"
-    );
-    readinessSection.addBoolean(
-      "energyColors",
-      "Change line color with weapon energy"
-    );
-    readinessSection.addBoolean(
       "hideWhenUnableToFire",
       "Hide lines while their plane cannot fire"
     );
-    addColorFields(readinessSection, "mediumEnergy", "Medium-energy line");
-    addColorFields(readinessSection, "lowEnergy", "Low-energy line");
 
     const threatSection = provider.addSection("Threat Alerts");
 
@@ -748,9 +684,9 @@
   SWAM.registerExtension({
     name: "Line of Fire",
     id: EXTENSION_ID,
-    description: "Terrain-aware aim vectors, weapon readiness, and threat warnings for nearby planes in StarMash.",
+    description: "Terrain-aware aim vectors, shoot-ready timing, and threat warnings for nearby planes in StarMash.",
     author: "Auroboris",
-    version: "1.2.0",
+    version: "1.3.0",
     settingsProvider: createSettingsProvider()
   });
 }();

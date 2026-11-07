@@ -15,14 +15,31 @@
     lineBrightness: 45,
     maxDistance: 6000,
     fadeWithDistance: true,
+    energyBrightness: true,
+    hideWhenUnableToFire: true,
     warningRadius: 250,
     dangerRadius: 100,
+    threatPulse: true,
+    threatPulseSpeed: 800,
+    threatPulseStrength: 85,
     normalColorPreset: "#ffffff",
-    normalCustomColor: "#ffffff",
-    warningColorPreset: "#ffcc00",
-    warningCustomColor: "#ffcc00",
-    dangerColorPreset: "#ff3b30",
-    dangerCustomColor: "#ff3b30"
+    normalCustomColor: "#ffffff"
+  };
+
+  const FIRE_ENERGY_BY_TYPE = {
+    1: 0.6,
+    2: 0.9,
+    3: 0.3,
+    4: 0.5,
+    5: 0.75
+  };
+
+  const FIRE_DELAY_MS_BY_TYPE = {
+    1: 550,
+    2: 300,
+    3: 300,
+    4: 500,
+    5: 300
   };
 
   const COLOR_OPTIONS = {
@@ -53,7 +70,9 @@
   let extensionActive = true;
   let gameReady = false;
   let animationFrame = null;
+  let fireTrackerInstalled = false;
   const lines = new Map();
+  const lastShotTimes = new Map();
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, Number(value)));
@@ -93,20 +112,13 @@
     );
   }
 
-  function getWarningColor() {
-    return getConfiguredColor(
-      "warningColorPreset",
-      "warningCustomColor",
-      DEFAULTS.warningColorPreset
-    );
-  }
+  function nowMs() {
+    if (typeof performance !== "undefined" &&
+      typeof performance.now === "function") {
+      return performance.now();
+    }
 
-  function getDangerColor() {
-    return getConfiguredColor(
-      "dangerColorPreset",
-      "dangerCustomColor",
-      DEFAULTS.dangerColorPreset
-    );
+    return Date.now();
   }
 
   function getPlayers() {
@@ -250,7 +262,48 @@
     return 0;
   }
 
-  function styleLine(entry, distance, threatLevel) {
+  function getFireEnergy(player) {
+    try {
+      if (typeof config !== "undefined" && config.ships &&
+        config.ships[player.type] &&
+        Number.isFinite(Number(config.ships[player.type].energyLight))) {
+        return clamp(config.ships[player.type].energyLight, 0, 1);
+      }
+    } catch (error) {
+      // Fall back to the standard StarMash plane values below.
+    }
+
+    return FIRE_ENERGY_BY_TYPE[Number(player.type)] || 0.5;
+  }
+
+  function getFireDelay(player) {
+    return FIRE_DELAY_MS_BY_TYPE[Number(player.type)] || 500;
+  }
+
+  function getWeaponReadiness(player, time) {
+    const reportedEnergy = Number(player.energy);
+    const energy = Number.isFinite(reportedEnergy)
+      ? clamp(reportedEnergy, 0, 1)
+      : 1;
+    const lastShot = lastShotTimes.get(String(player.id));
+    const cooldownReady = lastShot === undefined ||
+      time - lastShot >= getFireDelay(player);
+
+    return {
+      energy: energy,
+      canFire: energy + 0.001 >= getFireEnergy(player) && cooldownReady
+    };
+  }
+
+  function getThreatPulse(time, threatLevel) {
+    if (!settings.threatPulse) return 1;
+
+    const duration = clamp(settings.threatPulseSpeed, 250, 2000);
+    const wave = (Math.sin(time / duration * Math.PI * 2 - Math.PI / 2) + 1) / 2;
+    return wave * (threatLevel === 2 ? 1 : 0.7);
+  }
+
+  function styleLine(entry, player, distance, threatLevel, time) {
     const ownerScaleX = entry.owner.scale && Number(entry.owner.scale.x);
     const ownerScaleY = entry.owner.scale && Number(entry.owner.scale.y);
     const scaleX = Math.max(0.1, Math.abs(ownerScaleX || 1));
@@ -259,20 +312,30 @@
     const distanceFade = settings.fadeWithDistance
       ? clamp(1 - distance / maxDistance * 0.75, 0.25, 1)
       : 1;
-    const baseAlpha = clamp(settings.lineBrightness, 10, 100) / 100 * distanceFade;
+    const readiness = getWeaponReadiness(player, time);
+
+    if (settings.hideWhenUnableToFire && !readiness.canFire) return false;
+
+    let readinessFade = settings.energyBrightness
+      ? 0.3 + readiness.energy * 0.7
+      : 1;
+
+    if (!readiness.canFire) readinessFade *= 0.25;
+
+    const baseAlpha = clamp(settings.lineBrightness, 10, 100) / 100 *
+      distanceFade * readinessFade;
+    const threatStrength = clamp(settings.threatPulseStrength, 10, 100) / 100;
+    const pulse = threatLevel > 0 ? getThreatPulse(time, threatLevel) : 0;
 
     entry.sprite.width = clamp(settings.lineWidth, 1, 30) / scaleX;
     entry.sprite.height = clamp(settings.lineLength, 250, 10000) / scaleY;
-    entry.sprite.alpha = threatLevel === 2
-      ? 1
-      : threatLevel === 1
-        ? Math.max(0.8, baseAlpha)
-        : baseAlpha;
-    entry.sprite.tint = threatLevel === 2
-      ? getDangerColor()
-      : threatLevel === 1
-        ? getWarningColor()
-        : getNormalColor();
+    entry.sprite.alpha = clamp(
+      baseAlpha + (1 - baseAlpha) * pulse * threatStrength,
+      0,
+      1
+    );
+    entry.sprite.tint = getNormalColor();
+    return true;
   }
 
   function hideAllLines() {
@@ -284,6 +347,7 @@
   function updateLines() {
     const players = getPlayers();
     const me = getMe();
+    const time = nowMs();
 
     lines.forEach(function(entry, id) {
       if (!players[id] && !players[Number(id)]) removeLine(id);
@@ -320,9 +384,30 @@
         return;
       }
 
-      styleLine(entry, distance, threatLevel);
-      entry.sprite.visible = true;
+      entry.sprite.visible = styleLine(entry, player, distance, threatLevel, time);
     });
+  }
+
+  function installFireTracker() {
+    if (fireTrackerInstalled || typeof Mobs === "undefined" ||
+      typeof Mobs.add !== "function") {
+      return;
+    }
+
+    const originalAdd = Mobs.add;
+
+    Mobs.add = function() {
+      const result = originalAdd.apply(this, arguments);
+      const playerId = arguments[2];
+
+      if (playerId !== undefined && playerId !== null) {
+        lastShotTimes.set(String(playerId), nowMs());
+      }
+
+      return result;
+    };
+
+    fireTrackerInstalled = true;
   }
 
   function animate() {
@@ -332,6 +417,7 @@
 
   function start() {
     gameReady = true;
+    installFireTracker();
     if (!animationFrame) animationFrame = requestAnimationFrame(animate);
     updateLines();
   }
@@ -343,6 +429,7 @@
       animationFrame = null;
     }
     removeAllLines();
+    lastShotTimes.clear();
   }
 
   function normalizeKey(value) {
@@ -442,7 +529,18 @@
     lineSection.addBoolean("fadeWithDistance", "Fade distant lines");
     addColorFields(lineSection, "normal", "Normal line");
 
-    const threatSection = provider.addSection("Threat Warnings");
+    const readinessSection = provider.addSection("Weapon Readiness");
+
+    readinessSection.addBoolean(
+      "energyBrightness",
+      "Fade line brightness with weapon energy"
+    );
+    readinessSection.addBoolean(
+      "hideWhenUnableToFire",
+      "Hide lines while their plane cannot fire"
+    );
+
+    const threatSection = provider.addSection("Threat Alerts");
 
     threatSection.addSliderField("warningRadius", "Warning corridor radius", {
       min: 40,
@@ -454,8 +552,17 @@
       max: 500,
       step: 10
     });
-    addColorFields(threatSection, "warning", "Warning");
-    addColorFields(threatSection, "danger", "Danger");
+    threatSection.addBoolean("threatPulse", "Pulse lines aimed toward my plane");
+    threatSection.addSliderField("threatPulseSpeed", "Threat pulse interval", {
+      min: 250,
+      max: 2000,
+      step: 50
+    });
+    threatSection.addSliderField(
+      "threatPulseStrength",
+      "Threat pulse brightness",
+      {min: 10, max: 100, step: 5}
+    );
 
     return provider;
   }
@@ -465,15 +572,18 @@
   SWAM.on("gameWipe", stop);
   SWAM.on("keydown", handleKeyDown);
   SWAM.on("playerDestroyed", function(player) {
-    if (player) removeLine(player.id);
+    if (player) {
+      removeLine(player.id);
+      lastShotTimes.delete(String(player.id));
+    }
   });
 
   SWAM.registerExtension({
     name: "Line of Fire",
     id: EXTENSION_ID,
-    description: "Aim vectors and threat warnings for nearby planes in StarMash.",
+    description: "Aim vectors, weapon readiness, and threat warnings for nearby planes in StarMash.",
     author: "Auroboris",
-    version: "1.0.0",
+    version: "1.1.0",
     settingsProvider: createSettingsProvider()
   });
 }();
